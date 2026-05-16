@@ -131,7 +131,86 @@ def generate_image(description: str, style: str = "product", output_dir: str = "
         f.write(resp.content)
 
     print(f"✅ Saved: {filename}")
-    return filename
+
+    # Auto-apply branding overlay
+    branded = add_branding_overlay(filename)
+    return branded
+
+
+def add_branding_overlay(image_path: str) -> str:
+    """
+    Composites the PTW logo onto the bottom of the image.
+    Returns the path to the branded image (overwrites original).
+
+    Layout (bottom strip, 88px tall):
+      [dark semi-transparent bar]
+      [■ PTW ] PROJECT TEAM WEAR      projectteamwear.com
+      [orange]  bold white            mono grey
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    FONT_BOLD  = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
+    FONT_MONO  = "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf"
+    ACCENT     = (255, 58, 0)       # #FF3A00
+    DARK       = (8, 8, 8)          # #080808
+    CREAM      = (240, 237, 232)     # #F0EDE8
+    MUTED      = (160, 155, 148)
+
+    img = Image.open(image_path).convert("RGBA")
+    W, H = img.size
+
+    # ── Dark semi-transparent strip at the bottom ──────────────────────────
+    strip_h = max(88, H // 12)
+    overlay  = Image.new("RGBA", (W, strip_h), (0, 0, 0, 0))
+    draw_ov  = ImageDraw.Draw(overlay)
+    draw_ov.rectangle([(0, 0), (W, strip_h)], fill=(8, 8, 8, 210))
+
+    # ── Orange PTW block ───────────────────────────────────────────────────
+    pad      = strip_h // 6
+    box_h    = strip_h - pad * 2
+    box_w    = int(box_h * 1.15)          # slightly wider than tall
+    draw_ov.rectangle([(pad, pad), (pad + box_w, pad + box_h)], fill=ACCENT)
+
+    # "PTW" centred in the orange box
+    ptw_size = max(20, box_h - 18)
+    try:
+        ptw_font = ImageFont.truetype(FONT_BOLD, ptw_size)
+    except Exception:
+        ptw_font = ImageFont.load_default()
+    bbox   = draw_ov.textbbox((0, 0), "PTW", font=ptw_font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx     = pad + (box_w - tw) // 2
+    ty     = pad + (box_h - th) // 2 - bbox[1]
+    draw_ov.text((tx, ty), "PTW", font=ptw_font, fill=DARK)
+
+    # ── "PROJECT TEAM WEAR" wordmark ───────────────────────────────────────
+    text_x    = pad + box_w + pad
+    brand_sz  = max(14, box_h // 3)
+    sub_sz    = max(10, box_h // 5)
+    try:
+        brand_font = ImageFont.truetype(FONT_BOLD, brand_sz)
+        sub_font   = ImageFont.truetype(FONT_MONO,  sub_sz)
+    except Exception:
+        brand_font = sub_font = ImageFont.load_default()
+
+    # Top line: PROJECT TEAM WEAR
+    brand_bb = draw_ov.textbbox((0, 0), "PROJECT TEAM WEAR", font=brand_font)
+    brand_h  = brand_bb[3] - brand_bb[1]
+    brand_y  = pad + (box_h // 2) - brand_h - 2
+    draw_ov.text((text_x, brand_y), "PROJECT TEAM WEAR", font=brand_font, fill=CREAM)
+
+    # Bottom line: projectteamwear.com
+    url_y = brand_y + brand_h + 4
+    draw_ov.text((text_x, url_y), "projectteamwear.com", font=sub_font, fill=MUTED)
+
+    # ── Paste strip onto image ─────────────────────────────────────────────
+    img.paste(overlay, (0, H - strip_h), overlay)
+
+    # Save as RGB JPEG
+    out_path = image_path.replace(".jpg", "_branded.jpg").replace(".png", "_branded.jpg")
+    img.convert("RGB").save(out_path, "JPEG", quality=92)
+    print(f"✅ Branded: {out_path}")
+    return out_path
 
 
 def generate_caption(description: str, style: str) -> str:
