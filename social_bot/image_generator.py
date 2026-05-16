@@ -89,7 +89,7 @@ def get_fal_key() -> str:
 
 
 def generate_image(description: str, style: str = "product", output_dir: str = "output/images") -> str:
-    """Generate image via fal.ai FLUX. Returns saved file path."""
+    """Generate image via fal.ai FLUX. Returns saved branded file path."""
     try:
         import fal_client
     except ImportError:
@@ -106,10 +106,10 @@ def generate_image(description: str, style: str = "product", output_dir: str = "
     print(f"   {description[:90]}{'...' if len(description) > 90 else ''}\n")
 
     result = fal_client.subscribe(
-        "fal-ai/flux/schnell",          # Fast + free-credit friendly
+        "fal-ai/flux/schnell",
         arguments={
             "prompt": full_prompt,
-            "image_size": "square_hd",   # 1024×1024 — perfect for Instagram
+            "image_size": "square_hd",
             "num_inference_steps": 4,
             "num_images": 1,
             "enable_safety_checker": True,
@@ -119,7 +119,6 @@ def generate_image(description: str, style: str = "product", output_dir: str = "
 
     image_url = result["images"][0]["url"]
 
-    # Download and save
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     timestamp  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_style = style.replace("-", "_")
@@ -131,10 +130,65 @@ def generate_image(description: str, style: str = "product", output_dir: str = "
         f.write(resp.content)
 
     print(f"✅ Saved: {filename}")
+    return add_branding_overlay(filename)
 
-    # Auto-apply branding overlay
-    branded = add_branding_overlay(filename)
-    return branded
+
+def generate_jersey_scene(jersey_url: str, scene: str, output_dir: str = "output/images") -> str:
+    """
+    Take a real jersey WEBP and place it in a scene using FLUX Kontext.
+    The jersey design is preserved pixel-perfect; only the background changes.
+
+    jersey_url : public URL to one of the WEBP jersey mockups on GitHub Pages
+    scene      : description of the background/atmosphere to generate around it
+
+    Example scenes:
+      "dramatic indoor handball arena, stadium floodlights, blurred crowd"
+      "dark matte studio surface, soft side lighting, premium product photography"
+      "beach sand court, golden sunset, warm cinematic atmosphere"
+      "locker room, team preparing, authentic sport documentary feel"
+    """
+    try:
+        import fal_client
+    except ImportError:
+        print("❌ Run: pip install fal-client")
+        sys.exit(1)
+
+    os.environ["FAL_KEY"] = get_fal_key()
+
+    prompt = (
+        f"Keep the jersey in this image exactly as-is — same design, same colours, "
+        f"same graphics. Replace ONLY the white background with: {scene}. "
+        f"The jersey should remain the main subject, large and centred. "
+        f"Professional sports photography quality."
+    )
+
+    print(f"\n🏟️  Jersey scene  [{scene[:60]}...]")
+
+    result = fal_client.subscribe(
+        "fal-ai/flux-pro/kontext",
+        arguments={
+            "image_url": jersey_url,
+            "prompt": prompt,
+            "guidance_scale": 3.5,
+            "num_inference_steps": 28,
+            "image_size": "square_hd",
+        },
+        with_logs=False,
+    )
+
+    image_url = result["images"][0]["url"]
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename  = f"{output_dir}/ptw_jersey_scene_{timestamp}.jpg"
+
+    resp = requests.get(image_url, timeout=30)
+    resp.raise_for_status()
+    with open(filename, "wb") as f:
+        f.write(resp.content)
+
+    print(f"✅ Saved: {filename}")
+    return add_branding_overlay(filename)
 
 
 def add_branding_overlay(image_path: str) -> str:
@@ -385,14 +439,25 @@ def interactive_mode():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate social media images for Project Team Wear")
-    parser.add_argument("--description", type=str)
+    parser.add_argument("--description", type=str, help="Describe the image to generate from scratch")
     parser.add_argument("--style", choices=list(STYLE_PROMPTS.keys()), default="product")
+    parser.add_argument("--jersey-url", type=str, help="Public URL of a jersey WEBP to use as base image")
+    parser.add_argument("--scene", type=str, help="Background/scene description when using --jersey-url")
     parser.add_argument("--output-dir", default="output/images")
     parser.add_argument("--post-to-instagram", action="store_true")
     parser.add_argument("--caption", type=str, help="Custom caption (skips AI generation)")
     args = parser.parse_args()
 
-    if args.description:
+    if args.jersey_url:
+        scene   = args.scene or "dramatic indoor sports arena, stadium floodlights, blurred crowd"
+        path    = generate_jersey_scene(args.jersey_url, scene, args.output_dir)
+        desc    = f"Jersey scene: {scene}"
+        caption = args.caption or generate_caption(desc, "action")
+        if caption:
+            print(f"\n📝 Caption:\n\n{caption}")
+        if args.post_to_instagram:
+            post_to_instagram(path, caption)
+    elif args.description:
         path    = generate_image(args.description, args.style, args.output_dir)
         caption = args.caption or generate_caption(args.description, args.style)
         if caption:
