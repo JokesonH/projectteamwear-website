@@ -1,0 +1,324 @@
+"""
+image_generator.py — AI image generation for Project Team Wear social posts.
+Uses fal.ai (FLUX model) — free $5 credits on signup, ~$0.003–0.006/image after.
+
+Setup:
+  pip install fal-client requests pillow
+  export FAL_KEY="your-fal-api-key"   # from fal.ai/dashboard
+
+Usage:
+  # Interactive mode
+  python image_generator.py
+
+  # Quick CLI
+  python image_generator.py --style product --description "Red handball jersey flat lay"
+
+  # Generate + auto-post to Instagram
+  python image_generator.py \\
+    --style product \\
+    --description "Orange Eye of Sauron handball jersey" \\
+    --post-to-instagram
+
+Styles:
+  product       Studio flat lay, dark background, sharp fabric detail
+  lifestyle     Real teams, community energy, outdoor sport setting
+  editorial     Bold graphic design, typography-forward, Nike/Adidas aesthetic
+  action        Athletes in motion, dynamic, cinematic
+  behind-scenes Design process, workspace, craft and detail
+"""
+
+import os
+import sys
+import argparse
+import datetime
+import json
+import requests
+from pathlib import Path
+
+# ── Brand context injected into every prompt ────────────────────────────────
+BRAND_CONTEXT = (
+    "Project Team Wear, Australian custom sportswear brand. "
+    "Bold, professional, high quality. Dark aesthetic with orange accents. "
+    "Social media ready, square format, Instagram feed post."
+)
+
+# ── Style prompt prefixes ────────────────────────────────────────────────────
+STYLE_PROMPTS = {
+    "product": (
+        "Professional product photography. Dark studio background, soft directional lighting. "
+        "Clean flat lay or hanging shot. Sharp fabric texture detail, visible print quality. "
+        "Commercial sportswear catalogue style. "
+    ),
+    "lifestyle": (
+        "Authentic sports lifestyle photography. Real athletes, outdoor setting, natural light. "
+        "Candid community energy, weekend sport, Australian club culture. "
+        "Warm tones, genuine emotion, not overly polished. "
+    ),
+    "editorial": (
+        "Bold editorial graphic design. Strong typography, high contrast, dark background. "
+        "Nike or Adidas campaign aesthetic. Geometric composition, intentional negative space. "
+        "Magazine cover quality. "
+    ),
+    "action": (
+        "Dynamic sports action photography. Athlete in full motion, dramatic lighting. "
+        "Cinematic shallow depth of field, high shutter speed freeze. "
+        "Powerful, energetic, aspirational. "
+    ),
+    "behind-scenes": (
+        "Behind-the-scenes documentary style. Design studio or print workshop. "
+        "Jersey mockup on screen or print table, colour swatches, craft details. "
+        "Warm workspace lighting, authentic and approachable. "
+    ),
+}
+
+# ── Buffer / Instagram channel ID ────────────────────────────────────────────
+BUFFER_CHANNEL_ID = "6a069746090476fb99201f09"
+BUFFER_MCP_URL    = "https://mcp.buffer.com/mcp"
+
+
+def get_fal_key() -> str:
+    key = os.getenv("FAL_KEY")
+    if not key:
+        raise EnvironmentError(
+            "FAL_KEY not set.\n"
+            "  1. Sign up at https://fal.ai (free $5 credits)\n"
+            "  2. Get your key at https://fal.ai/dashboard/keys\n"
+            "  3. export FAL_KEY='your-key-here'"
+        )
+    return key
+
+
+def generate_image(description: str, style: str = "product", output_dir: str = "output/images") -> str:
+    """Generate image via fal.ai FLUX. Returns saved file path."""
+    try:
+        import fal_client
+    except ImportError:
+        print("❌ Run: pip install fal-client")
+        sys.exit(1)
+
+    key = get_fal_key()
+    os.environ["FAL_KEY"] = key
+
+    style_prefix = STYLE_PROMPTS.get(style, STYLE_PROMPTS["product"])
+    full_prompt = f"{style_prefix}{description}. {BRAND_CONTEXT}"
+
+    print(f"\n🎨 Generating image  [{style}]")
+    print(f"   {description[:90]}{'...' if len(description) > 90 else ''}\n")
+
+    result = fal_client.subscribe(
+        "fal-ai/flux/schnell",          # Fast + free-credit friendly
+        arguments={
+            "prompt": full_prompt,
+            "image_size": "square_hd",   # 1024×1024 — perfect for Instagram
+            "num_inference_steps": 4,
+            "num_images": 1,
+            "enable_safety_checker": True,
+        },
+        with_logs=False,
+    )
+
+    image_url = result["images"][0]["url"]
+
+    # Download and save
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    timestamp  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_style = style.replace("-", "_")
+    filename   = f"{output_dir}/ptw_{safe_style}_{timestamp}.jpg"
+
+    resp = requests.get(image_url, timeout=30)
+    resp.raise_for_status()
+    with open(filename, "wb") as f:
+        f.write(resp.content)
+
+    print(f"✅ Saved: {filename}")
+    return filename
+
+
+def generate_caption(description: str, style: str) -> str:
+    """Generate Instagram caption using Claude."""
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_key:
+        return ""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=anthropic_key)
+
+        style_tone = {
+            "product":       "bold product showcase — confident, aspirational",
+            "lifestyle":     "warm and community-focused — authentic, inclusive",
+            "editorial":     "bold and punchy — minimal words, maximum impact",
+            "action":        "energetic and motivating — athletic, competitive",
+            "behind-scenes": "warm and transparent — craft, care, process",
+        }.get(style, "bold and sporty")
+
+        msg = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=350,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Write an Instagram caption for Project Team Wear "
+                    f"(custom Australian sportswear company). "
+                    f"Image: {description}. "
+                    f"Tone: {style_tone}. "
+                    f"Include a CTA to DM for a quote or visit the link in bio. "
+                    f"End with 10 targeted hashtags. "
+                    f"Max 120 words total."
+                )
+            }]
+        )
+        return msg.content[0].text
+    except Exception as e:
+        print(f"⚠️  Caption generation skipped: {e}")
+        return ""
+
+
+def post_to_instagram(image_path: str, caption: str):
+    """Upload image to GitHub Pages and post to Instagram via Buffer MCP."""
+    buffer_token = os.getenv("BUFFER_TOKEN")
+    if not buffer_token:
+        print("\n⚠️  Set BUFFER_TOKEN to auto-post.")
+        print(f"   Image ready at: {image_path}")
+        print(f"\n📝 Caption:\n{caption}")
+        return
+
+    # Host image on GitHub Pages — upload to repo
+    print("\n⏳ Uploading image to GitHub Pages...")
+
+    gh_token  = os.getenv("GITHUB_TOKEN", "")
+    gh_repo   = "JokesonH/projectteamwear-website"
+    filename  = Path(image_path).name
+    gh_path   = f"social/generated/{filename}"
+    public_url = f"https://jokesonh.github.io/projectteamwear-website/{gh_path}"
+
+    if gh_token:
+        import base64
+        with open(image_path, "rb") as f:
+            content_b64 = base64.b64encode(f.read()).decode()
+
+        resp = requests.put(
+            f"https://api.github.com/repos/{gh_repo}/contents/{gh_path}",
+            headers={
+                "Authorization": f"token {gh_token}",
+                "Accept": "application/vnd.github.v3+json",
+            },
+            json={
+                "message": f"Add generated social image {filename}",
+                "content": content_b64,
+            },
+            timeout=30,
+        )
+        if resp.status_code not in (200, 201):
+            print(f"❌ GitHub upload failed: {resp.text}")
+            return
+
+        # Wait for Pages to propagate (usually 10–20s)
+        import time
+        print("⏳ Waiting for GitHub Pages...")
+        for _ in range(8):
+            time.sleep(10)
+            check = requests.get(public_url, timeout=10)
+            if check.status_code == 200:
+                print(f"✅ Image live at: {public_url}")
+                break
+        else:
+            print(f"⚠️  Pages may still be building. URL: {public_url}")
+    else:
+        print("⚠️  GITHUB_TOKEN not set — skipping auto-upload.")
+        print(f"   Manually upload the image and use its public URL.")
+        return
+
+    # Post via Buffer MCP
+    print("⏳ Queuing post to Instagram...")
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": "create_post",
+            "arguments": {
+                "channelId": BUFFER_CHANNEL_ID,
+                "schedulingType": "automatic",
+                "mode": "addToQueue",
+                "text": caption,
+                "assets": [{
+                    "image": {
+                        "url": public_url,
+                        "metadata": {"altText": description[:100]}
+                    }
+                }],
+                "metadata": {"instagram": {"type": "post", "shouldShareToFeed": True}}
+            }
+        }
+    }
+
+    resp = requests.post(
+        BUFFER_MCP_URL,
+        headers={
+            "Authorization": f"Bearer {buffer_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
+        json=payload,
+        timeout=30,
+    )
+
+    result = resp.json().get("result", {}).get("content", [{}])[0].get("text", "")
+    try:
+        parsed = json.loads(result)
+        if parsed.get("status") == "scheduled":
+            print(f"✅ Post queued! Scheduled for: {parsed.get('dueAt','')}")
+        else:
+            print(f"⚠️  Buffer response: {result}")
+    except Exception:
+        print(f"Buffer: {result or resp.text}")
+
+
+def interactive_mode():
+    print("\n🎨 Project Team Wear — Image Generator\n")
+    styles = list(STYLE_PROMPTS.keys())
+    for i, s in enumerate(styles, 1):
+        desc = STYLE_PROMPTS[s][:60].rstrip()
+        print(f"  {i}. {s:<16} {desc}...")
+
+    choice = input("\nChoose style (1-5 or name) [1]: ").strip() or "1"
+    if choice.isdigit():
+        style = styles[int(choice) - 1]
+    else:
+        style = choice if choice in STYLE_PROMPTS else "product"
+
+    description = input(f"\nDescribe what you want ({style}):\n> ").strip()
+    if not description:
+        print("❌ Description required.")
+        return
+
+    # Generate image
+    path = generate_image(description, style)
+
+    # Generate caption
+    print("\n⏳ Writing caption...")
+    caption = generate_caption(description, style)
+    if caption:
+        print(f"\n📝 Caption:\n\n{caption}")
+
+    # Offer to post
+    if input("\nPost to Instagram? (y/n) [y]: ").strip().lower() != "n":
+        post_to_instagram(path, caption)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate social media images for Project Team Wear")
+    parser.add_argument("--description", type=str)
+    parser.add_argument("--style", choices=list(STYLE_PROMPTS.keys()), default="product")
+    parser.add_argument("--output-dir", default="output/images")
+    parser.add_argument("--post-to-instagram", action="store_true")
+    parser.add_argument("--caption", type=str, help="Custom caption (skips AI generation)")
+    args = parser.parse_args()
+
+    if args.description:
+        path    = generate_image(args.description, args.style, args.output_dir)
+        caption = args.caption or generate_caption(args.description, args.style)
+        if caption:
+            print(f"\n📝 Caption:\n\n{caption}")
+        if args.post_to_instagram:
+            post_to_instagram(path, caption)
+    else:
+        interactive_mode()
